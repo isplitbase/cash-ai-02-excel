@@ -3209,9 +3209,8 @@ window._rebuildCFTable = function(){
       var E10=d(3), E11=d(4), E13=d(11), E16=d(20), E18=d(29);
       var E19=(rv(32,p_to)-rv(29,p_to)-rv(30,p_to))-(rv(32,p_from)-rv(29,p_from)-rv(30,p_from));
       var E20=d(30), E21=d(33), E25=d(40), E27=d(43);
-      var toka_to  = rv(23,p_to) -rv(1,p_to) -rv(3,p_to) -rv(4,p_to) -rv(11,p_to) -rv(20,p_to);
-      var toka_from= rv(23,p_from)-rv(1,p_from)-rv(3,p_from)-rv(4,p_from)-rv(11,p_from)-rv(20,p_from);
-      var E15=toka_to-toka_from;
+      // dd20 = その他流動資産計 を直接参照（残差計算を廃止）
+      var E15 = rv(20,p_to) - rv(20,p_from);
       var E24=(rv(42,p_to)-rv(40,p_to))-(rv(42,p_from)-rv(40,p_from));
 
       var H9=rv(46,p_from),I9=rv(46,p_to),J9=I9-H9;
@@ -4654,9 +4653,8 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         E10=d(8); E11=d(9); E13=d(16); E16=d(25); E18=d(34)
         E19=((rv(37,p_to)-rv(34,p_to)-rv(35,p_to))-(rv(37,p_from)-rv(34,p_from)-rv(35,p_from)))
         E20=d(35); E21=d(38); E25=d(45); E27=d(48)
-        toka_to  = rv(28,p_to) -rv(6,p_to) -rv(8,p_to) -rv(9,p_to) -rv(16,p_to) -rv(25,p_to)
-        toka_from= rv(28,p_from)-rv(6,p_from)-rv(8,p_from)-rv(9,p_from)-rv(16,p_from)-rv(25,p_from)
-        E15=toka_to-toka_from
+        # FS25→dd20 (その他流動資産計) を直接参照（残差計算を廃止）
+        E15 = rv(25,p_to) - rv(25,p_from)
         E24=(rv(47,p_to)-rv(45,p_to))-(rv(47,p_from)-rv(45,p_from))
 
         H9=rv(51,p_from);I9=rv(51,p_to);J9=I9-H9
