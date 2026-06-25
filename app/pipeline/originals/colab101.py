@@ -3741,7 +3741,7 @@ def _write_block_rows(ws, xl_row, ranges, layout):
 # ------------------------------------------------------------------
 # メイン
 # ------------------------------------------------------------------
-# (旧 _write_cf_sheet は名前ベース版へ移植・削除)
+# (旧 _write_cf_sheet は最新版CFへ移植・削除)
 
 
 
@@ -4285,9 +4285,9 @@ def _write_hendo_pl_bep_sheet(wb, data_dict, closing_dates):
 
 
 
-# ===== CF計算サブシステム（名前ベース・正規化・端数スナップ：移植）=====
+# ===== CF計算サブシステム（最新版dsec＋正規化＋端数スナップ：移植）=====
 def _normalize_acct(s):
-    """勘定科目名の表記ゆれを正規化（全角半角/集計語/記号/括弧/接続詞を吸収）"""
+    """勘定科目名の表記ゆれを正規化"""
     import unicodedata as _ud, re as _re
     s = _ud.normalize('NFKC', str(s or '')).strip()
     s = s.replace('小計', '計').replace('総計', '計').replace('合計', '計')
@@ -4366,6 +4366,55 @@ def _acct_first(name_idx, data_dict, key_list, period):
             except:
                 return 0.0
     return 0.0
+
+def _section_sum(name_idx, data_dict, section_names, period, exclude_names=None):
+    """
+    指定された分類(section)に属する明細科目を合算する。
+    集計行（〜計・〜合計）・見出し行・除外科目は合算対象外。
+
+    section_names: 対象とする分類名のリスト（例: ['流動資産']）
+    exclude_names: 合算から除外する勘定科目名のセット
+    """
+    if exclude_names is None:
+        exclude_names = set()
+    total = 0.0
+    for rn in sorted(data_dict.keys()):
+        row = data_dict[rn]
+        name = str(row.get('勘定科目') or '').strip()
+        sec  = str(row.get('分類') or row.get('section') or '').strip()
+        if not name:
+            continue
+        if sec not in section_names:
+            continue
+        # 集計行・見出し行は除外
+        if _is_aggregate_name(name):
+            continue
+        # 分類名と同じ名前の見出し行（例：分類'流動資産'で科目名も'流動資産'）は除外
+        if name in section_names:
+            continue
+        # 明示的な除外科目
+        if name in exclude_names:
+            continue
+        v = row.get(period, 0)
+        try:
+            total += float(v) if v not in (None, '', '""') else 0.0
+        except:
+            pass
+    return total
+
+def _agg_or_section(name_idx, data_dict, agg_candidates, section_names,
+                    period, exclude_names=None):
+    """
+    集計行優先・なければ分類合算 のフォールバック取得。
+    1. agg_candidates（集計行候補）が存在すればその値を返す
+    2. なければ section_names の分類から明細を合算（exclude_names除く）
+    """
+    # 集計行が存在するか確認
+    for nm in agg_candidates:
+        if nm in name_idx:
+            return _acct_first(name_idx, data_dict, [nm], period)
+    # なければ分類合算
+    return _section_sum(name_idx, data_dict, section_names, period, exclude_names)
 
 def _build_name_index(data_dict):
     """勘定科目名 → dd行番号 のインデックスを構築。同名は最初の出現を使用。"""
@@ -4649,6 +4698,18 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         def df(key_list):
             """候補リストの最初の科目の増減を返す（今期-前期）"""
             return ff(key_list, p_to) - ff(key_list, p_from)
+        def dsec(agg_candidates, section_names, exclude_names=None):
+            """集計行優先・なければ分類合算 の増減（今期-前期）"""
+            to   = _agg_or_section(name_idx, data_dict, agg_candidates,
+                                   section_names, p_to, exclude_names)
+            frm  = _agg_or_section(name_idx, data_dict, agg_candidates,
+                                   section_names, p_from, exclude_names)
+            return to - frm
+        def ssec(section_names, exclude_names=None):
+            """分類合算のみの増減（今期-前期）"""
+            to  = _section_sum(name_idx, data_dict, section_names, p_to, exclude_names)
+            frm = _section_sum(name_idx, data_dict, section_names, p_from, exclude_names)
+            return to - frm
 
         genkin_from = ff(_ACCT['現金'], p_from)
         genkin_to   = ff(_ACCT['現金'], p_to)
@@ -4666,15 +4727,28 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
 
         c14 = i(-d('受取手形'))
         c15 = i(-d('売掛金'))
-        c16 = i(-df(_ACCT['棚卸資産']))       # 棚卸資産（候補リスト）
-        c17 = i(-df(_ACCT['その他流動資産'])) # その他流動資産（候補リスト）
+        # c16 棚卸資産: 集計行(棚卸資産計)優先、なければ候補リストの個別科目
+        c16 = i(-df(_ACCT['棚卸資産']))       # 棚卸資産（候補リスト・個別科目対応済み）
+        # c17 その他流動資産: 集計行優先、なければ流動資産分類から
+        # 現金・受取手形・売掛金・棚卸資産系を除いた残りを合算
+        _c17_exclude = set()
+        _c17_exclude.update(_ACCT['現金'])
+        _c17_exclude.update(['受取手形', '売掛金'])
+        _c17_exclude.update(_ACCT['棚卸資産'])
+        c17 = i(-dsec(_ACCT['その他流動資産'], ['流動資産'], _c17_exclude))
         c18 = i(d('支払手形'))
         c19 = i(d('買掛金'))
         c20 = 0
         c20b = i(df(_ACCT['未払法人税']))     # 未払法人税等（候補リスト）
 
-        # c21: その他流動負債（流動負債合計 - 既計上科目の残差）
-        # c12計上科目・c19・c20b・未払金・支払手形を除いた残差
+        # c21: その他流動負債
+        # 流動負債合計（集計行）優先、なければ流動負債分類を合算してから
+        # 既計上科目（買掛金・未払金・未払法人税・引当金リスト・支払手形）を控除
+        def _ryudo_fusai(period):
+            if '流動負債合計' in name_idx:
+                return _acct_first(name_idx, data_dict, ['流動負債合計'], period)
+            return _section_sum(name_idx, data_dict, ['流動負債'], period)
+        _ryudo_diff = _ryudo_fusai(p_to) - _ryudo_fusai(p_from)
         c21_deduct = (
             d('買掛金')
             + d('未払金')
@@ -4682,11 +4756,18 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
             + da(_ACCT['引当金_リスト'])  # c12と同じ科目群を控除
             + d('支払手形')
         )
-        c21 = i(d('流動負債合計') - c21_deduct)
+        c21 = i(_ryudo_diff - c21_deduct)
 
-        # c22: その他固定負債（固定負債合計 - 長期借入金 - 役員長期借入金 の残差）
+        # c22: その他固定負債
+        # 固定負債合計（集計行）優先、なければ固定負債分類を合算してから
+        # 長期借入金・役員長期借入金を控除
+        def _kotei_fusai(period):
+            if '固定負債合計' in name_idx:
+                return _acct_first(name_idx, data_dict, ['固定負債合計'], period)
+            return _section_sum(name_idx, data_dict, ['固定負債'], period)
+        _kotei_diff = _kotei_fusai(p_to) - _kotei_fusai(p_from)
         c22 = i(
-            d('固定負債合計')
+            _kotei_diff
             - d('長期借入金')
             - df(_ACCT['役員借入金'])   # 役員長期借入金（候補リスト）
         )
@@ -4695,12 +4776,24 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
 
         # ── 投資CF ─────────────────────────────────────
         c28 = i(-d('土地'))
-        hyt_to   = v('有形固定資産合計') - v('土地')
-        hyt_from = vm('有形固定資産合計') - vm('土地')
+        # c29 減価償却資産: 有形固定資産（土地・建設仮勘定を除く）の増減＋減価償却費
+        # 集計行(有形固定資産合計)があれば「合計-土地-建設仮勘定」、なければ分類合算
+        def _hyt(period):
+            if '有形固定資産合計' in name_idx:
+                base = _acct_first(name_idx, data_dict, ['有形固定資産合計'], period)
+                base -= _v('土地', period) or 0
+                base -= _v('建設仮勘定', period) or 0
+                return base
+            else:
+                return _section_sum(name_idx, data_dict, ['有形固定資産'],
+                                    period, {'土地', '建設仮勘定'})
+        hyt_to   = _hyt(p_to)
+        hyt_from = _hyt(p_from)
         c29 = i(-((hyt_to - hyt_from) + c11))
         c30 = i(-d('建設仮勘定'))
         c31 = i(-d('無形固定資産'))
-        c34 = i(-df(_ACCT['投資その他資産']))  # 投資その他資産（候補リスト）
+        # c34 その他固定資産: 投資その他の資産合計（集計行）優先、なければ分類合算
+        c34 = i(-dsec(_ACCT['投資その他資産'], ['投資その他の資産']))
         c35 = i(-d('繰延資産'))
         c36 = c28+c29+c30+c31+c34+c35
         c37 = c24+c36
@@ -4881,7 +4974,7 @@ def generate_excel_report(output_path="/content/財務分析表.xlsx"):
     print(f"✅ Excelファイルを保存しました: {output_path}")
     return output_path
 
-# 実行はファイル末尾で1回だけ行う（重複生成を避ける）
+# 実行はファイル末尾で1回だけ（重複生成を回避）
 
 # デバッグ：増減額キーの確認
 _debug_rows = [r for r in list(data_dict.values()) if r.get("前期増減額") not in (None, 0, "", '""')]
@@ -4912,7 +5005,7 @@ _FS_TO_DD = {
    165: 148, 167: 150, 168: 151, 170: 153, 182: 161,
 }
 
-# (旧 calc_cf_from_data_dict は名前ベース版へ移植・削除)
+# (旧 calc_cf_from_data_dict は最新版CFへ移植・削除)
 
 
 
