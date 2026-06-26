@@ -4872,28 +4872,26 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         c15 = i(-d('売掛金'))
         # c16 棚卸資産: 集計行(棚卸資産計)優先、なければ候補リストの個別科目
         c16 = i(-df(_ACCT['棚卸資産']))       # 棚卸資産（候補リスト・個別科目対応済み）
-        # c17 その他流動資産: 集計行優先、なければ流動資産分類から
-        # 現金・受取手形・売掛金・棚卸資産系を除いた残りを合算
-        _c17_exclude = set()
-        _c17_exclude.update(_ACCT['現金'])
-        _c17_exclude.update(['受取手形', '売掛金'])
-        _c17_exclude.update(_ACCT['棚卸資産'])
-        _c17_exclude.update(_ACCT['有価証券'])    # c26で計上
-        _c17_exclude.update(_ACCT['短期貸付金'])  # c27で計上
-        # 集計行を使う場合、有価証券・短期貸付金が小計に含まれていれば控除
-        _c17_raw = dsec(_ACCT['その他流動資産'], ['流動資産'], _c17_exclude)
-        # 集計行が存在する場合は、小計に含まれる有価証券・短期貸付金を別途控除
-        _agg_hit_c17 = any(nm in name_idx for nm in _ACCT['その他流動資産'])
-        if _agg_hit_c17:
-            # 小計に短期貸付金が含まれる場合のみ控除（分類が「流動資産」なら含まれる）
-            _stl_sec = str(data_dict.get(name_idx.get('短期貸付金',-1),{}).get('分類','')).strip()
-            if '短期貸付金' in name_idx and ('流動資産' in _stl_sec):
-                _c17_raw -= da(_ACCT['短期貸付金'])
-            _yuk_sec = str(data_dict.get(name_idx.get('有価証券',-1),{}).get('分類','')).strip()
-            if '有価証券' in name_idx and ('流動資産' in _yuk_sec):
-                # 有価証券が当座資産（その他流動資産小計外）にある場合は控除不要
-                # その他流動資産小計に含まれる場合のみ控除（通常は含まれない）
-                pass
+        # c17 その他流動資産: [残差版] 流動資産合計 − 現金 − 受手 − 売掛 − 棚卸 − 有価証券 − 短期貸付
+        #   その他流動資産小計(行22)に入らない流動資産（例：当座資産(その他)＝有価証券が
+        #   別掲されているケース）も必ず網羅して取りこぼし0にする。
+        #   現金/受手/売掛=c14/c15、棚卸=c16、有価証券=c26、短期貸付=c27 で別計上するため控除。
+        def _ryudo_total(period):
+            for _nm in ['流動資産合計', '流動資産計', '流動資産の部合計']:
+                if _nm in name_idx:
+                    _mark_used(_nm)
+                    return _acct_first(name_idx, data_dict, [_nm], period)
+            return _section_sum_tracked(['流動資産'], period)
+        def _cash_at(period):
+            return genkin_to if period == p_to else (genkin_from if period == p_from else 0.0)
+        def _c17_other(period):
+            return (_ryudo_total(period)
+                    - _cash_at(period)
+                    - _v('受取手形', period) - _v('売掛金', period)
+                    - ff(_ACCT['棚卸資産'], period)
+                    - fa(_ACCT['有価証券'], period)
+                    - fa(_ACCT['短期貸付金'], period))
+        _c17_raw = _c17_other(p_to) - _c17_other(p_from)
         c17 = i(-_c17_raw)
         c18 = i(d('支払手形'))
         c19 = i(d('買掛金'))
