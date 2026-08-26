@@ -4304,11 +4304,13 @@ _ACCT = {
     # 棚卸資産
     '棚卸資産': [
         '棚卸資産計', '棚卸資産', '在庫', '棚卸高', '棚卸資産合計',
+        '棚卸資産小計',  # v27-3: 「小計」表記の帳票に対応
     ],
     # その他流動資産
     'その他流動資産': [
         'その他流動資産計', 'その他の流動資産計', 'その他流動資産',
         'その他の流動資産', 'その他流動資産合計',
+        'その他流動資産小計',  # v27-3: 「小計」表記の帳票に対応
     ],
     # 未払法人税等
     '未払法人税': [
@@ -4320,9 +4322,19 @@ _ACCT = {
         '未払消費税等', '未払消費税', '仮受消費税',
     ],
     # 投資その他の資産合計
+    # v27-3: 貸倒引当金（資産のマイナス評価勘定）。c17 から除外するための候補リスト
+    '貸倒引当金': [
+        '貸倒引当金', '貸倒引当金（▲）', '貸倒引当金(▲)', '貸倒引当金▲',
+        '貸倒引当金（△）', '貸倒引当金(△)', '貸倒引当金△',
+    ],
+    # v27-4: 無形固定資産（「無形固定資産小計」等の集計行表記にも対応）
+    '無形固定資産': [
+        '無形固定資産合計', '無形固定資産小計', '無形固定資産計', '無形固定資産',
+    ],
     '投資その他資産': [
         '投資その他の資産合計', '投資その他資産合計', '投資等合計',
         '投資その他の資産', '投資及びその他の資産合計',
+        '投資等小計', '投資その他の資産小計',  # v27-4: 「小計」表記にも対応
     ],
     # 役員長期借入金
     '役員借入金': [
@@ -4336,7 +4348,7 @@ _ACCT = {
     # c12 引当金・営業CF性流動負債（複数存在すれば合算）
     '引当金_リスト': [
         '賞与引当金', '役員賞与引当金', '退職給付引当金', '退職給与引当金',
-        '退職給付に係る負債', '製品保証引当金', '貸倒引当金',
+        '退職給付に係る負債', '製品保証引当金',  # 貸倒引当金は資産評価勘定→c17で処理
         '未払費用', '仮受金', '前受収益', '預り金',
     ],
     # c26 有価証券
@@ -4707,6 +4719,18 @@ def _write_cf_sheet(wb, cf_data, closing_dates):
 
     return ws
 
+# ==================================================================
+# CF計算ロジックをHTML側(ana-cash-ai-02)と同期 — 2026-08-26
+#   Excel と HTML で CF の計算結果がズレていたため、
+#   HTML側 CF_v27_6_period_guard の calc_cf_from_data_dict をそのまま移植。
+#   反映内容: v27-1(c44 配当推定を利益剰余金全体ベース) /
+#             v27-3(棚卸資産・その他流動資産の「小計」表記対応) /
+#             v27-4(c17 残差版の復元・c31 無形固定資産の候補リスト化) /
+#             v27-5(c17 残差版の入れ子小計対応)
+#   Excel固有の端数丸め（照合差1000円未満は0）は従来どおり保持。
+#   ※CF計算ロジックを変更する際は、必ず両リポジトリの
+#     calc_cf_from_data_dict を同期すること。
+# ==================================================================
 def calc_cf_from_data_dict(data_dict, closing_dates):
     """
     勘定科目名でdata_dictを参照してCFを計算する（恒久対策版）。
@@ -4858,6 +4882,9 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
             if not nm0 or nm0 in _c12_counted:
                 continue
             if '引当金' in sec0:
+                # 貸倒引当金（資産の評価勘定）は分類が資産系ならc17で処理するため除外
+                if '貸倒引当金' in nm0 and any(a in sec0 for a in ['流動資産','固定資産','投資その他','有形固定','無形固定','当座']):
+                    continue
                 # 集計見出し（分類名と同じ「引当金の部」など）も実残高があれば計上対象
                 _c12_counted.add(nm0)
                 _mark_used(nm0)
@@ -4873,14 +4900,30 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         # c16 棚卸資産: 集計行(棚卸資産計)優先、なければ候補リストの個別科目
         c16 = i(-df(_ACCT['棚卸資産']))       # 棚卸資産（候補リスト・個別科目対応済み）
         # c17 その他流動資産: [残差版] 流動資産合計 − 現金 − 受手 − 売掛 − 棚卸 − 有価証券 − 短期貸付
-        #   その他流動資産小計(行22)に入らない流動資産（例：当座資産(その他)＝有価証券が
-        #   別掲されているケース）も必ず網羅して取りこぼし0にする。
-        #   現金/受手/売掛=c14/c15、棚卸=c16、有価証券=c26、短期貸付=c27 で別計上するため控除。
+        #   v27-4: v25 にあった残差版を復元（v26/v27 で「明細合算版」に置き換わっていた）。
+        #   明細合算版では その他流動資産小計(行22) に入らない流動資産
+        #   （例: 当座資産(その他)＝有価証券が別掲されているケース）を取りこぼし、
+        #   また B/S の流動資産合計と内訳の差も吸収できず CF照合差の原因になっていた。
+        #   （ai_case 100070 で 前期 +70,675 / 今期 -58,435 が発生）
+        #   流動資産合計を基準にすることで分類漏れも必ず c17 に吸収され、
+        #   B/S との照合が構造的に保証される。
+        #   現金/受手/売掛=c14/c15、棚卸=c16、有価証券=c26、短期貸付=c27 で別計上のため控除。
         def _ryudo_total(period):
             for _nm in ['流動資産合計', '流動資産計', '流動資産の部合計']:
                 if _nm in name_idx:
                     _mark_used(_nm)
                     return _acct_first(name_idx, data_dict, [_nm], period)
+            # v27-5: 合計行がなくても「流動資産」見出し行が金額を持つ場合はそれを合計値として使う。
+            #   入れ子小計（当座資産/棚卸資産/その他流動資産）を持つ帳票では、
+            #   明細を単純合算すると小計行を二重計上して過大になるため見出し行を優先する。
+            #   財務諸表の慣行上、見出し行に金額があればそれは分類の合計値。
+            #   （ai_case 21425 で今期照合差 +516,697,188 が発生していた）
+            if '流動資産' in name_idx:
+                _head = _acct_first(name_idx, data_dict, ['流動資産'], period)
+                if _head != 0:
+                    _mark_used('流動資産')
+                    return _head
+            # 見出し行が0の場合のみ明細合算にフォールバック
             return _section_sum_tracked(['流動資産'], period)
         def _cash_at(period):
             return genkin_to if period == p_to else (genkin_from if period == p_from else 0.0)
@@ -4975,7 +5018,7 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         hyt_from = _hyt(p_from)
         c29 = i(-((hyt_to - hyt_from) + c11))
         c30 = i(-d('建設仮勘定'))
-        c31 = i(-d('無形固定資産'))
+        c31 = i(-df(_ACCT['無形固定資産']))  # v27-4: 「小計」表記にも対応
         # c34 その他固定資産: 投資その他の資産合計（集計行）優先、なければ分類合算
         c34 = i(-dsec(_ACCT['投資その他資産'], ['投資その他の資産']))
         c35 = i(-d('繰延資産'))
@@ -4990,17 +5033,43 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         c42 = i(d('資本金') + df(_ACCT['資本剰余金']))  # 資本剰余金（候補リスト）
         c43 = i(d('自己株式')) if '自己株式' in name_idx else 0
 
-        # c44: 配当金＋役員賞与（繰越利益剰余金ベース自動計算）
-        _rieki_candidates = [
+        # c44: 配当金＋役員賞与（利益剰余金全体ベース自動計算） ── v27-1
+        # v27 は「繰越利益剰余金」だけを基準にしていたため、準備金・積立金の取崩に
+        # 伴う現金流出を捕捉できず CF照合差が発生していた（例: ai_case 100071 で +25,000,000）。
+        # v27-1 では「利益剰余金全体」を基準とすることで、準備金・積立金の変動も含めて
+        # 配当・利益処分による現金流出を推定する。
+        # 優先度: 1) 利益剰余金合計/利益剰余金  2) 繰越利益剰余金 + 準備金・積立金
+        _rieki_total_candidates = [
+            '利益剰余金合計',
+            '利益剰余金',
+        ]
+        _rieki_partial_candidates = [
             'うち繰越利益剰余金',
             '繰越利益剰余金',
             '繰越利益剰余金・前期末残高',
-            '利益剰余金合計',
         ]
-        rieki_key = next((k for k in _rieki_candidates if k in name_idx), None)
-        rieki_rn = name_idx.get(rieki_key) if rieki_key else None
-        if rieki_key: _mark_used(rieki_key)
-        rieki70_diff = (_dd(rieki_rn, p_to) - _dd(rieki_rn, p_from)) if rieki_rn else 0
+        _reserve_candidates = [
+            'うち準備金、積立金',
+            '準備金・積立金',
+            '利益準備金',
+        ]
+        rieki70_diff = 0
+        _rieki_total_key = next((k for k in _rieki_total_candidates if k in name_idx), None)
+        if _rieki_total_key:
+            _rn = name_idx[_rieki_total_key]
+            rieki70_diff = _dd(_rn, p_to) - _dd(_rn, p_from)
+            _mark_used(_rieki_total_key)
+        else:
+            _partial_key = next((k for k in _rieki_partial_candidates if k in name_idx), None)
+            _reserve_key = next((k for k in _reserve_candidates if k in name_idx), None)
+            if _partial_key:
+                _rn = name_idx[_partial_key]
+                rieki70_diff += _dd(_rn, p_to) - _dd(_rn, p_from)
+                _mark_used(_partial_key)
+            if _reserve_key:
+                _rn = name_idx[_reserve_key]
+                rieki70_diff += _dd(_rn, p_to) - _dd(_rn, p_from)
+                _mark_used(_reserve_key)
         c44 = -i(_dd(154, p_to) - rieki70_diff)
 
         c45 = c39+c40+c41+c42+c43+c44
@@ -5009,6 +5078,7 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         c48 = i(c46+c47)
         c49 = i(genkin_to)
         c50 = c48-c49
+        # Excel固有: 千円単位帳票の端数を吸収（照合差1000円未満は0に丸める）
         if 0 < abs(c50) < 1000:
             c48 = c49
             c50 = 0
@@ -5097,6 +5167,42 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         'period_konki': period_konki,
         'used_names': _used_all,
     }
+
+
+# ==================================================================
+# 未割当て科目 承認UI HTML生成（A案）
+# ==================================================================
+
+# CF項目の選択肢定義（プルダウン用）
+# (value, ラベル, 符号タイプ)  符号タイプ: 'asset'=資産(増→CF減), 'liab'=負債純資産(増→CF増)
+_CF_ASSIGN_OPTIONS = [
+    ('', '― 未割当て ―', ''),
+    ('c12', '営業：諸引当金', 'liab'),
+    ('c14', '営業：受取手形', 'asset'),
+    ('c15', '営業：売掛金', 'asset'),
+    ('c16', '営業：棚卸資産', 'asset'),
+    ('c17', '営業：その他流動資産', 'asset'),
+    ('c18', '営業：支払手形', 'liab'),
+    ('c19', '営業：買掛金', 'liab'),
+    ('c20', '営業：前受金', 'liab'),
+    ('c20b', '営業：未払法人税等', 'liab'),
+    ('c21', '営業：その他流動負債', 'liab'),
+    ('c22', '営業：その他固定負債', 'liab'),
+    ('c28', '投資：土地', 'asset'),
+    ('c29', '投資：減価償却資産', 'asset'),
+    ('c30', '投資：建設仮勘定', 'asset'),
+    ('c31', '投資：無形固定資産', 'asset'),
+    ('c34', '投資：その他固定資産', 'asset'),
+    ('c35', '投資：繰延資産', 'asset'),
+    ('c39', '財務：短期借入金', 'liab'),
+    ('c40', '財務：長期借入金', 'liab'),
+    ('c41', '財務：社債等', 'liab'),
+    ('c42', '財務：増資等', 'liab'),
+    ('c43', '財務：自己株式', 'liab'),
+    ('c44', '財務：配当金', 'liab'),
+    ('EXCLUDE', '◆ CFに含めない', ''),
+]
+
 
 # ===== CF計算サブシステム ここまで =====
 
